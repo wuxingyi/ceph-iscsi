@@ -75,14 +75,6 @@ class RBDDev(object):
                                     self.size_bytes,
                                     features=RBDDev.default_features(self.backstore),
                                     old_format=False)
-                    with rbd.Image(ioctx, self.image) as image:
-                        # set default qos parameters to this newly created image
-                        image.metadata_set('conf_rbd_qos_iops_limit', '400')
-                        image.metadata_set('conf_rbd_qos_write_iops_limit', '200')
-                        image.metadata_set('conf_rbd_qos_read_iops_limit', '200')
-                        image.metadata_set('conf_rbd_qos_bps_limit', '20971520')
-                        image.metadata_set('conf_rbd_qos_write_bps_limit', '10485760')
-                        image.metadata_set('conf_rbd_qos_read_bps_limit', '10485760')
 
                 except (rbd.ImageExists, rbd.InvalidArgument) as err:
                     self.error = True
