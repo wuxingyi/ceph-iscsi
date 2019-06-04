@@ -931,6 +931,77 @@ def get_disks():
 
     return jsonify(response), 200
 
+@app.route('/api/disk/qos/<pool>/<image>', methods=['GET', 'PUT'])
+@requires_restricted_auth
+def qos(pool, image):
+    """
+    set qos parameters to a rbd image
+
+    :param pool: (str) pool name
+    :param image: (str) rbd image name
+    :param total_iops_limit: (str) total iops limit for this iamge
+    :param read_iops_limit: (str) read iops limit for this iamge
+    :param write_iops_limit: (str) read iops limit for this iamge
+    :param total_bps_limit: (str) total bps limit for this iamge
+    :param read_bps_limit: (str) read bps limit for this iamge
+    :param write_bps_limit: (str) read bps limit for this iamge
+
+    **RESTRICTED**
+    Examples:
+    curl --insecure --user admin:admin -d total_iops_limit=100 -d read_iops_limit=40 -d write_iops_limit=50 
+        -X PUT https://192.168.122.69:5000/api/disk/qos/rbd/haha
+    curl --insecure --user admin:admin -X GET https://192.168.122.69:5000/api/disk/qos/rbd/haha
+    """
+    # we only process disks existing in our current configuration
+    image_id = '{}/{}'.format(pool, image)
+
+    if image_id not in config.config['disks']:
+        return jsonify(message="rbd image {} not "
+                               "found".format(image_id)), 404
+
+    if request.method == 'PUT':
+        got = False
+        qos = {}
+        for limit in "conf_rbd_qos_iops_limit", "conf_rbd_qos_read_iops_limit", "conf_rbd_qos_write_iops_limit", "conf_rbd_qos_bps_limit", "conf_rbd_qos_read_bps_limit", "conf_rbd_qos_write_bps_limit":
+            v = request.form.get(limit)
+            if v:
+                try:
+                    int(v)
+                except ValueError:
+                    return jsonify(message="Image {} qos parameter {} should be integer".format(image_id, limit)), 400
+                if int(v) < 0:
+                    return jsonify(message="Image {} qos parameter {} should be a positive number".format(image_id, limit)), 400
+
+                qos[limit] = v
+
+        if qos:
+            logger.debug("rbd qos parameters: {},{},{},{},{},{}".format(qos["conf_rbd_qos_iops_limit"], qos["conf_rbd_qos_read_iops_limit"], 
+                          qos["conf_rbd_qos_write_iops_limit"], qos["conf_rbd_qos_bps_limit"], qos["conf_rbd_qos_read_bps_limit"], qos["conf_rbd_qos_write_bps_limit"]))
+
+            try:
+                rbd_image = RBDDev(image, 0, LUN.DEFAULT_BACKSTORE, pool)
+                rbd_image.rbd_setqos(qos)
+                if rbd_image.error:
+                    return jsonify(message="Image {} setqos failed, because of {}".format(image_id, rbd_image.error_msg)), 500
+                
+            except rbd.ImageNotFound:
+                return jsonify(message="Image {} does not exist".format(image_id)), 404
+
+            return jsonify(message="set qos parameters successfully"), 200
+        else:
+            return jsonify(message="Image {} qos: no qos parameter".format(image_id)), 400
+    elif request.method == "GET":
+        try:
+            rbd_image = RBDDev(image, 0, LUN.DEFAULT_BACKSTORE, pool)
+        except rbd.ImageNotFound:
+            return jsonify(message="Image {} does not exist".format(image_id)), 404
+
+        qos = rbd_image.rbd_getqos()
+        if rbd_image.error:
+            return jsonify(message="Image {} getqos failed, because of {}".format(image_id, rbd_image.error_msg)), 500
+        else:
+            return jsonify({"qos": qos}), 200
+
 
 @app.route('/api/disk/<pool>/<image>', methods=['GET', 'PUT', 'DELETE'])
 @requires_restricted_auth
@@ -2607,7 +2678,7 @@ def pre_reqs_errors():
     dist_translations = {
         "centos": "redhat"}
     valid_dists = {
-        "redhat": 7.4}
+        "redhat": 7.1}
 
     required_rpms = [
         {"name": "python-rtslib",

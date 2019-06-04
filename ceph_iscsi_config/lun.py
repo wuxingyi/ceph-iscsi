@@ -75,6 +75,14 @@ class RBDDev(object):
                                     self.size_bytes,
                                     features=RBDDev.default_features(self.backstore),
                                     old_format=False)
+                    with rbd.Image(ioctx, self.image) as image:
+                        # set default qos parameters to this newly created image
+                        image.metadata_set('conf_rbd_qos_iops_limit', '400')
+                        image.metadata_set('conf_rbd_qos_write_iops_limit', '200')
+                        image.metadata_set('conf_rbd_qos_read_iops_limit', '200')
+                        image.metadata_set('conf_rbd_qos_bps_limit', '20971520')
+                        image.metadata_set('conf_rbd_qos_write_bps_limit', '10485760')
+                        image.metadata_set('conf_rbd_qos_read_bps_limit', '10485760')
 
                 except (rbd.ImageExists, rbd.InvalidArgument) as err:
                     self.error = True
@@ -157,6 +165,74 @@ class RBDDev(object):
                                               "{}".format(self.image))
                         else:
                             self.changed = True
+
+    def rbd_setqos(self, qos):
+        """
+        set qos parameters
+        :param qos: qos parameters (dict) qos parameters to control the iops/bps rate
+        """
+        with rados.Rados(conffile=settings.config.cephconf,
+                         name=settings.config.cluster_client_name) as cluster:
+            with cluster.open_ioctx(self.pool) as ioctx:
+                with rbd.Image(ioctx, self.image) as rbd_image:
+                    lock_info = rbd_image.list_lockers()
+                    if lock_info:
+                        lockers = lock_info.get("lockers")
+                        for holder in lockers:
+                            try:
+                                rbd_image.break_lock(holder[0], holder[1])
+                            except Exception:
+                                self.error = True
+                                self.error_msg = ("failed to break lock for {}".format(self.image))
+                                return
+
+                        try:
+                            rbd_image.lock_acquire(rbd.RBD_LOCK_MODE_EXCLUSIVE)
+                        except Exception:
+                            self.error = True
+                            self.error_msg = ("failed to acquire lock for {}".format(self.image))
+                            return
+                        
+                        for key, limit in qos.items():
+                            try:
+                                rbd_image.metadata_set(key, limit)
+                            except Exception:
+                                # should retry, we can't rollback here
+                                self.error = True
+                                self.error_msg = ("failed to call metadata_set for param {} in setting for image {}".format(key, self.image))
+                                rbd_image.lock_release()
+                                return
+    
+                    else:
+                        for key, limit in qos.items():
+                            try:
+                                rbd_image.metadata_set(key, limit)
+                            except Exception:
+                                # should retry
+                                self.error = True
+                                self.error_msg = ("failed to call metadata_set for param {} in setting for image {}".format(key, self.image))
+                                return
+        return
+                        
+    def rbd_getqos(self):
+        """
+        get qos parameters
+        :return: dict qos parameters to control the iops/bps rate
+        """
+        with rados.Rados(conffile=settings.config.cephconf, name=settings.config.cluster_client_name) as cluster:
+            with cluster.open_ioctx(self.pool) as ioctx:
+                with rbd.Image(ioctx, self.image) as rbd_image:
+                    try:
+                        ml = rbd_image.metadata_list()
+                        qos = {}
+                        for key, limit in ml:
+                            if key.startswith('conf_rbd_qos_'):
+                                qos[key] = limit
+                        return qos    
+                    except Exception as err:
+                        self.error = True
+                        self.error_msg = ("failed to get qos parameters for image {}, error is {}".format(self.image, err))
+        return
 
     def _get_size_bytes(self):
         """
