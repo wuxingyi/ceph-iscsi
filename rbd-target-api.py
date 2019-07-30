@@ -160,7 +160,6 @@ def get_api_info():
 
     return jsonify(api=links), 200
 
-
 @app.route('/api/sysinfo/<query_type>', methods=['GET'])
 @requires_basic_auth
 def get_sys_info(query_type=None):
@@ -719,7 +718,7 @@ def _gateway(target_iqn=None, gateway_name=None):
         return jsonify(message="Gateway defined/mapped"), 200
 
 
-@app.route('/api/targetlun/<target_iqn>', methods=['PUT', 'DELETE'])
+@app.route('/api/targetlun/<target_iqn>', methods=['PUT', 'DELETE', 'GET'])
 @requires_restricted_auth
 def target_disk(target_iqn=None):
     """
@@ -739,6 +738,9 @@ def target_disk(target_iqn=None):
         return jsonify(message=err_str), 500
 
     target_config = config.config['targets'][target_iqn]
+
+    if request.method == 'GET':
+        return jsonify({"disks": target_config['disks']}), 200
 
     portals = [key for key in target_config['portals']]
     # Any disk operation needs at least 2 gateways to be present
@@ -1945,11 +1947,16 @@ def clientlun(target_iqn, client_iqn):
     """
     Coordinate the addition(PUT) and removal(DELETE) of a disk for a client
     :param client_iqn: (str) IQN of the client
-    :param disk: (str) rbd image name of the format pool/image
+    :param disks: (list) rbd images name of the format pool/image
+    :param handleall: (bool) handle all existing disks
     **RESTRICTED**
     Examples:
-    curl --insecure --user admin:admin -d disk=rbd.new2_1
+    curl --insecure --user admin:admin -d disks=rbd.new2_1 -d disks=rbd.new2_2
         -X PUT https://192.168.122.69:5000/api/clientlun/iqn.2017-08.org.ceph:iscsi-gw0
+    curl --insecure --user admin:admin -d disks=rbd.new2_1 -d disks=rbd.new2_2
+        -X DELETE https://192.168.122.69:5000/api/clientlun/iqn.2017-08.org.ceph:iscsi-gw0
+    curl --insecure --user admin:admin -d handleall=true
+        -X DELETE https://192.168.122.69:5000/api/clientlun/iqn.2017-08.org.ceph:iscsi-gw0
     """
 
     try:
@@ -1964,24 +1971,73 @@ def clientlun(target_iqn, client_iqn):
         err_str = "Invalid iqn {} - {}".format(client_iqn, err)
         return jsonify(message=err_str), 500
 
+    if not target_iqn in config.config['targets']:
+        err_str = "Target {} not exists".format(target_iqn)
+        return jsonify(message=err_str), 500
+
     # http_mode = 'https' if settings.config.api_secure else 'http'
     target_config = config.config['targets'][target_iqn]
+
+    if not client_iqn in target_config['clients']:
+        err_str = "Client {} not exists".format(client_iqn)
+        return jsonify(message=err_str), 500
+
     try:
         gateways = get_remote_gateways(target_config['portals'], logger)
     except CephiSCSIError as err:
         return jsonify(message="{}".format(err)), 400
+    
+    targetdisks = target_config['disks']
+    if not len(targetdisks):
+        return jsonify(message="no disks in this target, can't processing this request"), 400
 
-    disk = request.form.get('disk')
+    ishandleall = request.form['handleall'] == 'true'
+    disks = list(set(request.form.getlist("disks")))
+
+    #when handle all disks, no disks should be passed
+    if ishandleall and len(disks):
+        return jsonify(message="no disks should be provided when handleall is true"), 400
 
     lun_list = list(target_config['clients'][client_iqn]['luns'].keys())
+    #when deleting luns, should have already mapped some luns to this client
+    if request.method == 'DELETE':
+        if len(lun_list) == 0:
+            return jsonify(message="no existing disks for unmapping"), 400
+
+    #disks should be defined in configuration
+    if not ishandleall:
+        for disk in disks:
+            if disk not in targetdisks:
+                return jsonify(message="Disk {} is not defined in the configuration".format(disk)), 400
+
+    #from now on, only use disks, not ishandleall any more
+    if ishandleall:
+        disks = copy.deepcopy(targetdisks)
+
     if request.method == 'PUT':
-        lun_list.append(disk)
+        hasnewdisks = False
+        for disk in disks:
+            if disk in lun_list:
+                continue;
+            else:
+                hasnewdisks = True
+                lun_list.append(disk)
+
+        if not hasnewdisks:
+            return jsonify(message="no new disks for adding, nothing to do for this client"), 400
     else:
         # this is a delete request
-        if disk in lun_list:
-            lun_list.remove(disk)
-        else:
-            return jsonify(message="disk not mapped to client"), 400
+        hasremoveddisks = False
+
+        for disk in disks:
+            if not disk in lun_list:
+                continue;
+            else:
+                hasremoveddisks = True
+                lun_list.remove(disk)
+        if not hasremoveddisks:
+            return jsonify(message="no new disks for removing, nothing to do for this client"), 400
+            
 
     auth_config = target_config['clients'][client_iqn]['auth']
     chap_obj = CHAP(auth_config['username'],
