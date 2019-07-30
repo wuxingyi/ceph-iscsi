@@ -108,7 +108,7 @@ class Settings(object):
                 "api_password": "admin",
                 "ceph_user": "admin",
                 "debug": "false",
-                "minimum_gateways": 2,
+                "minimum_gateways": 1,
                 "ceph_config_dir": '/etc/ceph',
                 "priv_key": 'iscsi-gateway.key',
                 "pub_key": 'iscsi-gateway-pub.key',
