@@ -2123,9 +2123,20 @@ def client(target_iqn, client_iqn):
     Handle the client create/delete actions across gateways
     :param target_iqn: (str) IQN of the target
     :param client_iqn: (str) IQN of the client to create or delete
+    :param username: (str) username string is 8-64 chars long containing any alphanumeric in
+                           [0-9a-zA-Z] and '.' ':' '@' '_' '-'
+    :param password: (str) password string is 12-16 chars long containing any alphanumeric in
+                           [0-9a-zA-Z] and '@' '-' '_' '/'
+    :param mutual_username: (str) mutual_username string is 8-64 chars long containing any
+                            alphanumeric in
+                            [0-9a-zA-Z] and '.' ':' '@' '_' '-'
+    :param mutual_password: (str) mutual_password string is 12-16 chars long containing any
+                            alphanumeric in
+                            [0-9a-zA-Z] and '@' '-' '_' '/'
     **RESTRICTED**
     Examples:
-    curl --insecure --user admin:admin
+    curl --insecure --user admin:admin -d username=myiscsiusername -d password=myiscsipassword
+        -d mutual_username=myiscsiusername -d mutual_password=myiscsipassword
         -X PUT https://192.168.122.69:5000/api/client/iqn.1994-05.com.redhat:myhost4
     curl --insecure --user admin:admin
         -X DELETE https://192.168.122.69:5000/api/client/iqn.1994-05.com.redhat:myhost4
@@ -2153,16 +2164,28 @@ def client(target_iqn, client_iqn):
     except CephiSCSIError as err:
         return jsonify(message="{}".format(err)), 400
 
+    # committing host is the node responsible for updating the config object
+    username = request.form.get('username', '')
+    password = request.form.get('password', '')
+    mutual_username = request.form.get('mutual_username', '')
+    mutual_password = request.form.get('mutual_password', '')
+
     # validate the PUT/DELETE request first
     client_usable = valid_client(mode=method[request.method],
                                  client_iqn=client_iqn,
-                                 target_iqn=target_iqn)
+                                 target_iqn=target_iqn,
+                                 username=username,
+                                 password=password,
+                                 mutual_username=mutual_username,
+                                 mutual_password=mutual_password)
     if client_usable != 'ok':
         return jsonify(message=client_usable), 400
 
-    # committing host is the node responsible for updating the config object
-    api_vars = {"committing_host": this_host()}
-
+    api_vars = {"committing_host": this_host(),
+                "username": username,
+                "password": password,
+                "mutual_username": mutual_username,
+                "mutual_password": mutual_password}
     if request.method == 'PUT':
         # creating a client is done locally first, then applied to the
         # other gateways
