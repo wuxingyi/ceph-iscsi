@@ -2115,6 +2115,88 @@ def _clientlun(target_iqn, client_iqn):
 
         return jsonify(message=status_text), status_code
 
+#purge all clients of a target
+@app.route('/api/v2/clients/<target_iqn>', methods=['DELETE'])
+@requires_restricted_auth
+def clients(target_iqn):
+    """
+    Handle the client create/delete actions across gateways
+    :param target_iqn: (str) IQN of the target
+    **RESTRICTED**
+    Examples:
+    curl --insecure --user admin:admin 
+        -X PUT https://192.168.122.69:5000/api/v2/clients/iqn.1994-05.com.redhat:myhost4
+    """
+
+    try:
+        target_iqn, iqn_type = normalize_wwn(['iqn'], target_iqn)
+    except RTSLibError as err:
+        err_str = "Invalid iqn {} - {}".format(target_iqn, err)
+        return jsonify(message=err_str), 500
+
+    if target_iqn not in config.config['targets']:
+        return jsonify(message="Target {} does not exist".format(target_iqn)), 400
+
+    # http_mode = 'https' if settings.config.api_secure else 'http'
+    target_config = config.config['targets'][target_iqn]
+    try:
+        gateways = get_remote_gateways(target_config['portals'], logger)
+    except CephiSCSIError as err:
+        return jsonify(message="{}".format(err)), 400
+
+    clients = target_config['clients']
+    if not len(clients):
+        return jsonify(message="nothing to do because target {} has no client".format(target_iqn)), 200
+
+    #it's batch deletion, we exit if some clients are not ready for deletion
+    for cl in clients:
+        client_usable = valid_client(mode='delete',
+                                     client_iqn=cl,
+                                     target_iqn=target_iqn)
+        if client_usable != 'ok':
+            return jsonify(message=client_usable), 400
+
+    api_vars = {"committing_host": this_host()}
+
+    # Process flow: remote gateways > local > delete config object entry
+    gateways.append('localhost')
+
+    resp_text, resp_code = call_api(gateways, '_clients',
+                                    '{}'.format(target_iqn),
+                                    http_method='delete',
+                                    api_vars=api_vars)
+
+    return jsonify(message="clients delete {}".format(resp_text)), \
+        resp_code
+
+@app.route('/api/_clients/<target_iqn>', methods=['DELETE'])
+@requires_restricted_auth
+def _purge_clients(target_iqn):
+    """
+    Manage a client definition on the local gateway
+    Internal Use ONLY
+    :param target_iqn: iscsi name for the target
+    **RESTRICTED**
+    """
+    # DELETE request
+    committing_host = request.form['committing_host']
+
+    # Make sure the delete request is for a client we have defined
+    target_config = config.config['targets'][target_iqn]
+    for client_iqn, _ in target_config['clients'].items():
+        client = GWClient(logger, client_iqn, '', '', '', '', '', target_iqn)
+        client.manage('absent', committer=committing_host)
+
+        if client.error:
+            logger.error("Failed to remove client : "
+                         "{}".format(client.error_msg))
+            return jsonify(message="Failed to remove client"), 500
+
+        else:
+            if committing_host == this_host():
+                config.refresh()
+
+    return jsonify(message="Client deleted ok"), 200
 
 @app.route('/api/client/<target_iqn>/<client_iqn>', methods=['PUT', 'DELETE'])
 @requires_restricted_auth
