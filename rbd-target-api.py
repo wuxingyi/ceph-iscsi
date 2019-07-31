@@ -2125,7 +2125,7 @@ def clients(target_iqn):
     **RESTRICTED**
     Examples:
     curl --insecure --user admin:admin 
-        -X PUT https://192.168.122.69:5000/api/v2/clients/iqn.1994-05.com.redhat:myhost4
+        -X DELETE https://192.168.122.69:5000/api/v2/clients/iqn.1994-05.com.redhat:myhost4
     """
 
     try:
@@ -2169,6 +2169,7 @@ def clients(target_iqn):
     return jsonify(message="clients delete {}".format(resp_text)), \
         resp_code
 
+#(FIXME)should return errors of any single client
 @app.route('/api/_clients/<target_iqn>', methods=['DELETE'])
 @requires_restricted_auth
 def _purge_clients(target_iqn):
@@ -2196,7 +2197,7 @@ def _purge_clients(target_iqn):
             if committing_host == this_host():
                 config.refresh()
 
-    return jsonify(message="Client deleted ok"), 200
+    return jsonify(message="Clients deleted ok"), 200
 
 @app.route('/api/client/<target_iqn>/<client_iqn>', methods=['PUT', 'DELETE'])
 @requires_restricted_auth
