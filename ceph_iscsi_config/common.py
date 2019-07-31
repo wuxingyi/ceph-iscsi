@@ -2,6 +2,7 @@ import rados
 import time
 import json
 import traceback
+import pdb
 
 from ceph_iscsi_config.backstore import USER_RBD
 import ceph_iscsi_config.settings as settings
@@ -55,10 +56,12 @@ class Config(object):
                                       'mutual_username': '',
                                       'mutual_password': '',
                                       'mutual_password_encryption_enabled': False},
-                   "version": 9,
+                   "version": 10,
                    "epoch": 0,
                    "created": '',
-                   "updated": ''
+                   "updated": '',
+                   "users": {},
+                   "usergroups": {}
                    }
 
     lock_time_limit = 30

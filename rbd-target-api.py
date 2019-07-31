@@ -2115,6 +2115,124 @@ def _clientlun(target_iqn, client_iqn):
 
         return jsonify(message=status_text), status_code
 
+@app.route('/api/v2/user/<client_iqn>', methods=['PUT', 'DELETE'])
+@requires_restricted_auth
+def user(client_iqn):
+    """
+    Handle user creation/deletion
+    :param client_iqn: (str) IQN of the target
+    **RESTRICTED**
+    Examples:
+    curl --insecure --user admin:admin 
+        -X DELETE https://192.168.122.69:5000/api/v2/user/iqn.1994-05.com.redhat:myhost4
+    """
+
+    try:
+        client_iqn, iqn_type = normalize_wwn(['iqn'], client_iqn)
+    except RTSLibError as err:
+        err_str = "Invalid iqn {} - {}".format(client_iqn, err)
+        return jsonify(message=err_str), 500
+
+    if client_iqn in config.config['users'] and request.method == 'PUT':
+        return jsonify(message="client {} already in user configuration".format(client_iqn)), 400
+
+    if not client_iqn in config.config['users'] and request.method == 'DELETE':
+        return jsonify(message="client {} not exists in user configuration".format(client_iqn)), 400
+    
+    if request.method == 'PUT':
+        config.add_item('users', client_iqn)
+        config.commit("retain")
+    else:
+        config.del_item('users', client_iqn)
+        config.commit("retain")
+        
+    return jsonify(message="client created successfully"), 200
+
+@app.route('/api/v2/usergroup/<groupname>/<client_iqn>', methods=['PUT', 'DELETE'])
+@requires_restricted_auth
+def group_user(groupname, client_iqn):
+    """
+    add/remove client from group
+    :param groupname: (str) name of a usergroups
+    :param client_iqn: (str) client IQN name
+    **RESTRICTED**
+    Examples:
+    curl --insecure --user admin:admin 
+        -X DELETE https://192.168.122.69:5000/api/v2/usergroup/asdf/iqn.1994-05.com.redhat:myhost4
+    """
+    try:
+        client_iqn, iqn_type = normalize_wwn(['iqn'], client_iqn)
+    except RTSLibError as err:
+        err_str = "Invalid iqn {} - {}".format(client_iqn, err)
+        return jsonify(message=err_str), 500
+
+    if not groupname in config.config['usergroups']:
+        return jsonify(message="group {} not exists in group configuration".format(groupname)), 400
+
+    if client_iqn in config.config['usergroups'][groupname]['userlist'] and request.method == 'PUT':
+        return jsonify(message="client {} already in user group {}".format(client_iqn, groupname)), 400
+
+    if client_iqn not in config.config['users'] and request.method == 'DELETE':
+        return jsonify(message="client {} not exist in user group {}".format(client_iqn, groupname)), 400
+    
+    if request.method == 'PUT':
+        ul = config.config['usergroups'][groupname]['userlist']
+        ul.append(client_iqn)
+        config.update_item('usergroups', groupname, {'userlist':ul})
+        config.commit("retain")
+        return jsonify(message="user added successfully"), 200
+    else:
+        config.del_item('usergroups', groupname, client_iqn)
+        config.commit("retain")
+        return jsonify(message="user removed deleted successfully"), 200
+        
+@app.route('/api/v2/usergroups/<groupname>', methods=['PUT', 'DELETE'])
+@requires_restricted_auth
+def usergroups(groupname):
+    """
+    Handle user creation/deletion
+    :param groupname: (str) name of a usergroups
+    **RESTRICTED**
+    Examples:
+    curl --insecure --user admin:admin 
+        -X DELETE https://192.168.122.69:5000/api/v2/usergroups/asdf
+    """
+
+    if groupname in config.config['usergroups'] and request.method == 'PUT':
+        return jsonify(message="group {} already in group configuration".format(groupname)), 400
+
+    if not groupname in config.config['usergroups'] and request.method == 'DELETE':
+        return jsonify(message="group {} not exists in group configuration".format(groupname)), 400
+    
+    if request.method == 'PUT':
+        seedgroup = {'userlist': []}
+        config.add_item('usergroups', groupname, seedgroup)
+        config.commit("retain")
+        return jsonify(message="usergroups created successfully"), 200
+    else:
+        config.del_item('usergroups', groupname)
+        config.commit("retain")
+        return jsonify(message="usergroups deleted successfully"), 200
+
+@app.route('/api/v2/usergroups', methods=['GET'])
+@requires_restricted_auth
+def getusergroups():
+    """
+    list user groups in the system
+    **RESTRICTED**
+    Examples:
+    curl --insecure --user admin:admin 
+        -X DELETE https://192.168.122.69:5000/api/v2/usergroups
+    """
+    if request.method == 'GET':
+        s = []
+        for i in config.config['usergroups'].keys():
+            s.append(i)
+        return jsonify(message=s), 200
+    else:
+        return jsonify(message="method not supported"), 400
+        
+
 #purge all clients of a target
 @app.route('/api/v2/clients/<target_iqn>', methods=['DELETE'])
 @requires_restricted_auth
