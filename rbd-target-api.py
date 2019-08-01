@@ -2238,7 +2238,7 @@ def getusergroups():
 @requires_restricted_auth
 def clients(target_iqn):
     """
-    Handle the client create/delete actions across gateways
+    purge all clients of a target
     :param target_iqn: (str) IQN of the target
     **RESTRICTED**
     Examples:
@@ -2287,7 +2287,7 @@ def clients(target_iqn):
     return jsonify(message="clients delete {}".format(resp_text)), \
         resp_code
 
-#(FIXME)should return errors of any single client
+#(FIXME)should return errors of any failed client
 @app.route('/api/_clients/<target_iqn>', methods=['DELETE'])
 @requires_restricted_auth
 def _purge_clients(target_iqn):
