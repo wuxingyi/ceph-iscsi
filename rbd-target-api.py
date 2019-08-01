@@ -2115,12 +2115,23 @@ def _clientlun(target_iqn, client_iqn):
 
         return jsonify(message=status_text), status_code
 
-@app.route('/api/v2/user/<client_iqn>', methods=['PUT', 'DELETE'])
+# create/remove a user(actually an iqn)
+@app.route('/api/v2/user/<client_iqn>', methods=['PUT', 'DELETE', 'GET'])
 @requires_restricted_auth
 def user(client_iqn):
     """
-    Handle user creation/deletion
+    Handle user creation/deletion(also support store auth)
     :param client_iqn: (str) IQN of the target
+    :param username: (str) username string is 8-64 chars long containing any alphanumeric in
+                           [0-9a-zA-Z] and '.' ':' '@' '_' '-'
+    :param password: (str) password string is 12-16 chars long containing any alphanumeric in
+                           [0-9a-zA-Z] and '@' '-' '_' '/'
+    :param mutual_username: (str) mutual_username string is 8-64 chars long containing any
+                            alphanumeric in
+                            [0-9a-zA-Z] and '.' ':' '@' '_' '-'
+    :param mutual_password: (str) mutual_password string is 12-16 chars long containing any
+                            alphanumeric in
+                            [0-9a-zA-Z] and '@' '-' '_' '/'
     **RESTRICTED**
     Examples:
     curl --insecure --user admin:admin 
@@ -2133,20 +2144,61 @@ def user(client_iqn):
         err_str = "Invalid iqn {} - {}".format(client_iqn, err)
         return jsonify(message=err_str), 500
 
-    if client_iqn in config.config['users'] and request.method == 'PUT':
-        return jsonify(message="client {} already in user configuration".format(client_iqn)), 400
-
-    if not client_iqn in config.config['users'] and request.method == 'DELETE':
+    if not client_iqn in config.config['users'] and (request.method == 'DELETE' or request.method == 'GET'):
         return jsonify(message="client {} not exists in user configuration".format(client_iqn)), 400
     
     if request.method == 'PUT':
-        config.add_item('users', client_iqn)
+        username = request.form.get('username', '')
+        password = request.form.get('password', '')
+        mutual_username = request.form.get('mutual_username', '')
+        mutual_password = request.form.get('mutual_password', '')
+
+        #reconfig user auth
+        if client_iqn in config.config['users']:
+            original_username = config.config['users'][client_iqn]['username']
+            original_password = config.config['users'][client_iqn]['password']
+            original_mutual_username = config.config['users'][client_iqn]['mutual_username']
+            original_mutual_password = config.config['users'][client_iqn]['mutual_password']
+
+            if ((username == original_username) and (password == original_password) 
+                and (mutual_username == original_mutual_username) and (mutual_password == original_mutual_password)):
+                return jsonify(message="client created successfully"), 200
+
+        # Validate request
+        error_msg = valid_credentials(username, password, mutual_username, mutual_password)
+        if error_msg:
+            logger.error("BAD auth request: {}".format(error_msg))
+            return jsonify(message=error_msg), 400
+
+        # Apply to all gateways
+        api_vars = {"username": username,
+                    "password": password,
+                    "mutual_username": mutual_username,
+                    "mutual_password": mutual_password}
+
+        if not client_iqn in config.config['users']:
+            config.add_item('users', client_iqn, api_vars)
+        else:
+            config.update_item('users', client_iqn, api_vars)
+            
         config.commit("retain")
-    else:
+        return jsonify(message="client created successfully"), 200
+    elif request.method == 'DELETE':
         config.del_item('users', client_iqn)
         config.commit("retain")
+        return jsonify(message="client removed successfully"), 200
+    else:
+        username = config.config['users'][client_iqn]['username']
+        password = config.config['users'][client_iqn]['password']
+        mutual_username = config.config['users'][client_iqn]['mutual_username']
+        mutual_password = config.config['users'][client_iqn]['mutual_password']
+
+        auth = {"username": username,
+                "password": password,
+                "mutual_username": mutual_username,
+                "mutual_password": mutual_password}
         
-    return jsonify(message="client created successfully"), 200
+        return jsonify(message=auth), 200
 
 @app.route('/api/v2/usergroup/<groupname>/<client_iqn>', methods=['PUT', 'DELETE'])
 @requires_restricted_auth
