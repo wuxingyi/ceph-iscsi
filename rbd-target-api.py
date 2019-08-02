@@ -160,7 +160,6 @@ def get_api_info():
 
     return jsonify(api=links), 200
 
-
 @app.route('/api/sysinfo/<query_type>', methods=['GET'])
 @requires_basic_auth
 def get_sys_info(query_type=None):
@@ -397,7 +396,7 @@ def local_target_reconfigure(target_iqn, tpg_controls, client_controls):
     target_config = config.config['targets'][target_iqn]
     for client_iqn in target_config['clients']:
         client_metadata = target_config['clients'][client_iqn]
-        image_list = client_metadata['luns'].keys()
+        image_list = list(client_metadata['luns'].keys())
         client_auth_config = client_metadata['auth']
         client_chap = CHAP(client_auth_config['username'],
                            client_auth_config['password'],
@@ -719,7 +718,7 @@ def _gateway(target_iqn=None, gateway_name=None):
         return jsonify(message="Gateway defined/mapped"), 200
 
 
-@app.route('/api/targetlun/<target_iqn>', methods=['PUT', 'DELETE'])
+@app.route('/api/targetlun/<target_iqn>', methods=['PUT', 'DELETE', 'GET'])
 @requires_restricted_auth
 def target_disk(target_iqn=None):
     """
@@ -739,6 +738,9 @@ def target_disk(target_iqn=None):
         return jsonify(message=err_str), 500
 
     target_config = config.config['targets'][target_iqn]
+
+    if request.method == 'GET':
+        return jsonify({"disks": target_config['disks']}), 200
 
     portals = [key for key in target_config['portals']]
     # Any disk operation needs at least 2 gateways to be present
@@ -1041,10 +1043,13 @@ def disk(pool, image):
     image_id = '{}/{}'.format(pool, image)
 
     if request.method == 'GET':
-
         if image_id in config.config['disks']:
-            return jsonify(config.config["disks"][image_id]), 200
-
+            try:
+                rbd_image = RBDDev(image, 0, LUN.DEFAULT_BACKSTORE, pool)
+                size = rbd_image.current_size
+            except rbd.ImageNotFound:
+                return jsonify(message="Image {} does not exist".format(image_id)), 400
+            return jsonify(messages={"size": size}), 200
         else:
             return jsonify(message="rbd image {} not "
                                    "found".format(image_id)), 404
@@ -1945,11 +1950,16 @@ def clientlun(target_iqn, client_iqn):
     """
     Coordinate the addition(PUT) and removal(DELETE) of a disk for a client
     :param client_iqn: (str) IQN of the client
-    :param disk: (str) rbd image name of the format pool/image
+    :param disks: (list) rbd images name of the format pool/image
+    :param handleall: (bool) handle all existing disks
     **RESTRICTED**
     Examples:
-    curl --insecure --user admin:admin -d disk=rbd.new2_1
+    curl --insecure --user admin:admin -d disks=rbd.new2_1 -d disks=rbd.new2_2
         -X PUT https://192.168.122.69:5000/api/clientlun/iqn.2017-08.org.ceph:iscsi-gw0
+    curl --insecure --user admin:admin -d disks=rbd.new2_1 -d disks=rbd.new2_2
+        -X DELETE https://192.168.122.69:5000/api/clientlun/iqn.2017-08.org.ceph:iscsi-gw0
+    curl --insecure --user admin:admin -d handleall=true
+        -X DELETE https://192.168.122.69:5000/api/clientlun/iqn.2017-08.org.ceph:iscsi-gw0
     """
 
     try:
@@ -1964,24 +1974,73 @@ def clientlun(target_iqn, client_iqn):
         err_str = "Invalid iqn {} - {}".format(client_iqn, err)
         return jsonify(message=err_str), 500
 
+    if not target_iqn in config.config['targets']:
+        err_str = "Target {} not exists".format(target_iqn)
+        return jsonify(message=err_str), 500
+
     # http_mode = 'https' if settings.config.api_secure else 'http'
     target_config = config.config['targets'][target_iqn]
+
+    if not client_iqn in target_config['clients']:
+        err_str = "Client {} not exists".format(client_iqn)
+        return jsonify(message=err_str), 500
+
     try:
         gateways = get_remote_gateways(target_config['portals'], logger)
     except CephiSCSIError as err:
         return jsonify(message="{}".format(err)), 400
+    
+    targetdisks = target_config['disks']
+    if not len(targetdisks):
+        return jsonify(message="no disks in this target, can't processing this request"), 400
 
-    disk = request.form.get('disk')
+    ishandleall = request.form['handleall'] == 'true'
+    disks = list(set(request.form.getlist("disks")))
+
+    #when handle all disks, no disks should be passed
+    if ishandleall and len(disks):
+        return jsonify(message="no disks should be provided when handleall is true"), 400
 
     lun_list = list(target_config['clients'][client_iqn]['luns'].keys())
+    #when deleting luns, should have already mapped some luns to this client
+    if request.method == 'DELETE':
+        if len(lun_list) == 0:
+            return jsonify(message="no existing disks for unmapping"), 400
+
+    #disks should be defined in configuration
+    if not ishandleall:
+        for disk in disks:
+            if disk not in targetdisks:
+                return jsonify(message="Disk {} is not defined in the configuration".format(disk)), 400
+
+    #from now on, only use disks, not ishandleall any more
+    if ishandleall:
+        disks = copy.deepcopy(targetdisks)
+
     if request.method == 'PUT':
-        lun_list.append(disk)
+        hasnewdisks = False
+        for disk in disks:
+            if disk in lun_list:
+                continue;
+            else:
+                hasnewdisks = True
+                lun_list.append(disk)
+
+        if not hasnewdisks:
+            return jsonify(message="no new disks for adding, nothing to do for this client"), 400
     else:
         # this is a delete request
-        if disk in lun_list:
-            lun_list.remove(disk)
-        else:
-            return jsonify(message="disk not mapped to client"), 400
+        hasremoveddisks = False
+
+        for disk in disks:
+            if not disk in lun_list:
+                continue;
+            else:
+                hasremoveddisks = True
+                lun_list.remove(disk)
+        if not hasremoveddisks:
+            return jsonify(message="no new disks for removing, nothing to do for this client"), 400
+            
 
     auth_config = target_config['clients'][client_iqn]['auth']
     chap_obj = CHAP(auth_config['username'],
@@ -2059,6 +2118,259 @@ def _clientlun(target_iqn, client_iqn):
 
         return jsonify(message=status_text), status_code
 
+# create/remove a user(actually an iqn)
+@app.route('/api/v2/user/<client_iqn>', methods=['PUT', 'DELETE', 'GET'])
+@requires_restricted_auth
+def user(client_iqn):
+    """
+    Handle user creation/deletion(also support store auth)
+    :param client_iqn: (str) IQN of the target
+    :param username: (str) username string is 8-64 chars long containing any alphanumeric in
+                           [0-9a-zA-Z] and '.' ':' '@' '_' '-'
+    :param password: (str) password string is 12-16 chars long containing any alphanumeric in
+                           [0-9a-zA-Z] and '@' '-' '_' '/'
+    :param mutual_username: (str) mutual_username string is 8-64 chars long containing any
+                            alphanumeric in
+                            [0-9a-zA-Z] and '.' ':' '@' '_' '-'
+    :param mutual_password: (str) mutual_password string is 12-16 chars long containing any
+                            alphanumeric in
+                            [0-9a-zA-Z] and '@' '-' '_' '/'
+    **RESTRICTED**
+    Examples:
+    curl --insecure --user admin:admin 
+        -X DELETE https://192.168.122.69:5000/api/v2/user/iqn.1994-05.com.redhat:myhost4
+    """
+
+    try:
+        client_iqn, iqn_type = normalize_wwn(['iqn'], client_iqn)
+    except RTSLibError as err:
+        err_str = "Invalid iqn {} - {}".format(client_iqn, err)
+        return jsonify(message=err_str), 500
+
+    if not client_iqn in config.config['users'] and (request.method == 'DELETE' or request.method == 'GET'):
+        return jsonify(message="client {} not exists in user configuration".format(client_iqn)), 400
+    
+    if request.method == 'PUT':
+        username = request.form.get('username', '')
+        password = request.form.get('password', '')
+        mutual_username = request.form.get('mutual_username', '')
+        mutual_password = request.form.get('mutual_password', '')
+
+        #reconfig user auth
+        if client_iqn in config.config['users']:
+            original_username = config.config['users'][client_iqn]['username']
+            original_password = config.config['users'][client_iqn]['password']
+            original_mutual_username = config.config['users'][client_iqn]['mutual_username']
+            original_mutual_password = config.config['users'][client_iqn]['mutual_password']
+
+            if ((username == original_username) and (password == original_password) 
+                and (mutual_username == original_mutual_username) and (mutual_password == original_mutual_password)):
+                return jsonify(message="client created successfully"), 200
+
+        # Validate request
+        error_msg = valid_credentials(username, password, mutual_username, mutual_password)
+        if error_msg:
+            logger.error("BAD auth request: {}".format(error_msg))
+            return jsonify(message=error_msg), 400
+
+        # Apply to all gateways
+        api_vars = {"username": username,
+                    "password": password,
+                    "mutual_username": mutual_username,
+                    "mutual_password": mutual_password}
+
+        if not client_iqn in config.config['users']:
+            config.add_item('users', client_iqn, api_vars)
+        else:
+            config.update_item('users', client_iqn, api_vars)
+            
+        config.commit("retain")
+        return jsonify(message="client created successfully"), 200
+    elif request.method == 'DELETE':
+        config.del_item('users', client_iqn)
+        config.commit("retain")
+        return jsonify(message="client removed successfully"), 200
+    else:
+        username = config.config['users'][client_iqn]['username']
+        password = config.config['users'][client_iqn]['password']
+        mutual_username = config.config['users'][client_iqn]['mutual_username']
+        mutual_password = config.config['users'][client_iqn]['mutual_password']
+
+        auth = {"username": username,
+                "password": password,
+                "mutual_username": mutual_username,
+                "mutual_password": mutual_password}
+        
+        return jsonify(message=auth), 200
+
+@app.route('/api/v2/usergroup/<groupname>/<client_iqn>', methods=['PUT', 'DELETE'])
+@requires_restricted_auth
+def group_user(groupname, client_iqn):
+    """
+    add/remove client from group
+    :param groupname: (str) name of a usergroups
+    :param client_iqn: (str) client IQN name
+    **RESTRICTED**
+    Examples:
+    curl --insecure --user admin:admin 
+        -X DELETE https://192.168.122.69:5000/api/v2/usergroup/asdf/iqn.1994-05.com.redhat:myhost4
+    """
+    try:
+        client_iqn, iqn_type = normalize_wwn(['iqn'], client_iqn)
+    except RTSLibError as err:
+        err_str = "Invalid iqn {} - {}".format(client_iqn, err)
+        return jsonify(message=err_str), 500
+
+    if not groupname in config.config['usergroups']:
+        return jsonify(message="group {} not exists in group configuration".format(groupname)), 400
+
+    if client_iqn in config.config['usergroups'][groupname]['userlist'] and request.method == 'PUT':
+        return jsonify(message="client {} already in user group {}".format(client_iqn, groupname)), 400
+
+    if client_iqn not in config.config['users'] and request.method == 'DELETE':
+        return jsonify(message="client {} not exist in user group {}".format(client_iqn, groupname)), 400
+    
+    if request.method == 'PUT':
+        ul = config.config['usergroups'][groupname]['userlist']
+        ul.append(client_iqn)
+        config.update_item('usergroups', groupname, {'userlist':ul})
+        config.commit("retain")
+        return jsonify(message="user added successfully"), 200
+    else:
+        config.del_item('usergroups', groupname, client_iqn)
+        config.commit("retain")
+        return jsonify(message="user removed deleted successfully"), 200
+        
+@app.route('/api/v2/usergroups/<groupname>', methods=['PUT', 'DELETE'])
+@requires_restricted_auth
+def usergroups(groupname):
+    """
+    Handle user creation/deletion
+    :param groupname: (str) name of a usergroups
+    **RESTRICTED**
+    Examples:
+    curl --insecure --user admin:admin 
+        -X DELETE https://192.168.122.69:5000/api/v2/usergroups/asdf
+    """
+
+    if groupname in config.config['usergroups'] and request.method == 'PUT':
+        return jsonify(message="group {} already in group configuration".format(groupname)), 400
+
+    if not groupname in config.config['usergroups'] and request.method == 'DELETE':
+        return jsonify(message="group {} not exists in group configuration".format(groupname)), 400
+    
+    if request.method == 'PUT':
+        seedgroup = {'userlist': []}
+        config.add_item('usergroups', groupname, seedgroup)
+        config.commit("retain")
+        return jsonify(message="usergroups created successfully"), 200
+    else:
+        config.del_item('usergroups', groupname)
+        config.commit("retain")
+        return jsonify(message="usergroups deleted successfully"), 200
+
+@app.route('/api/v2/usergroups', methods=['GET'])
+@requires_restricted_auth
+def getusergroups():
+    """
+    list user groups in the system
+    **RESTRICTED**
+    Examples:
+    curl --insecure --user admin:admin 
+        -X DELETE https://192.168.122.69:5000/api/v2/usergroups
+    """
+    if request.method == 'GET':
+        s = []
+        for i in config.config['usergroups'].keys():
+            s.append(i)
+        return jsonify(message=s), 200
+    else:
+        return jsonify(message="method not supported"), 400
+        
+
+#purge all clients of a target
+@app.route('/api/v2/clients/<target_iqn>', methods=['DELETE'])
+@requires_restricted_auth
+def clients(target_iqn):
+    """
+    purge all clients of a target
+    :param target_iqn: (str) IQN of the target
+    **RESTRICTED**
+    Examples:
+    curl --insecure --user admin:admin 
+        -X DELETE https://192.168.122.69:5000/api/v2/clients/iqn.1994-05.com.redhat:myhost4
+    """
+
+    try:
+        target_iqn, iqn_type = normalize_wwn(['iqn'], target_iqn)
+    except RTSLibError as err:
+        err_str = "Invalid iqn {} - {}".format(target_iqn, err)
+        return jsonify(message=err_str), 500
+
+    if target_iqn not in config.config['targets']:
+        return jsonify(message="Target {} does not exist".format(target_iqn)), 400
+
+    # http_mode = 'https' if settings.config.api_secure else 'http'
+    target_config = config.config['targets'][target_iqn]
+    try:
+        gateways = get_remote_gateways(target_config['portals'], logger)
+    except CephiSCSIError as err:
+        return jsonify(message="{}".format(err)), 400
+
+    clients = target_config['clients']
+    if not len(clients):
+        return jsonify(message="nothing to do because target {} has no client".format(target_iqn)), 200
+
+    #it's batch deletion, we exit if some clients are not ready for deletion
+    for cl in clients:
+        client_usable = valid_client(mode='delete',
+                                     client_iqn=cl,
+                                     target_iqn=target_iqn)
+        if client_usable != 'ok':
+            return jsonify(message=client_usable), 400
+
+    api_vars = {"committing_host": this_host()}
+
+    # Process flow: remote gateways > local > delete config object entry
+    gateways.append('localhost')
+
+    resp_text, resp_code = call_api(gateways, '_clients',
+                                    '{}'.format(target_iqn),
+                                    http_method='delete',
+                                    api_vars=api_vars)
+
+    return jsonify(message="clients delete {}".format(resp_text)), \
+        resp_code
+
+#(FIXME)should return errors of any failed client
+@app.route('/api/_clients/<target_iqn>', methods=['DELETE'])
+@requires_restricted_auth
+def _purge_clients(target_iqn):
+    """
+    Manage a client definition on the local gateway
+    Internal Use ONLY
+    :param target_iqn: iscsi name for the target
+    **RESTRICTED**
+    """
+    # DELETE request
+    committing_host = request.form['committing_host']
+
+    # Make sure the delete request is for a client we have defined
+    target_config = config.config['targets'][target_iqn]
+    for client_iqn, _ in target_config['clients'].items():
+        client = GWClient(logger, client_iqn, '', '', '', '', '', target_iqn)
+        client.manage('absent', committer=committing_host)
+
+        if client.error:
+            logger.error("Failed to remove client : "
+                         "{}".format(client.error_msg))
+            return jsonify(message="Failed to remove client"), 500
+
+        else:
+            if committing_host == this_host():
+                config.refresh()
+
+    return jsonify(message="Clients deleted ok"), 200
 
 @app.route('/api/client/<target_iqn>/<client_iqn>', methods=['PUT', 'DELETE'])
 @requires_restricted_auth
@@ -2067,9 +2379,20 @@ def client(target_iqn, client_iqn):
     Handle the client create/delete actions across gateways
     :param target_iqn: (str) IQN of the target
     :param client_iqn: (str) IQN of the client to create or delete
+    :param username: (str) username string is 8-64 chars long containing any alphanumeric in
+                           [0-9a-zA-Z] and '.' ':' '@' '_' '-'
+    :param password: (str) password string is 12-16 chars long containing any alphanumeric in
+                           [0-9a-zA-Z] and '@' '-' '_' '/'
+    :param mutual_username: (str) mutual_username string is 8-64 chars long containing any
+                            alphanumeric in
+                            [0-9a-zA-Z] and '.' ':' '@' '_' '-'
+    :param mutual_password: (str) mutual_password string is 12-16 chars long containing any
+                            alphanumeric in
+                            [0-9a-zA-Z] and '@' '-' '_' '/'
     **RESTRICTED**
     Examples:
-    curl --insecure --user admin:admin
+    curl --insecure --user admin:admin -d username=myiscsiusername -d password=myiscsipassword
+        -d mutual_username=myiscsiusername -d mutual_password=myiscsipassword
         -X PUT https://192.168.122.69:5000/api/client/iqn.1994-05.com.redhat:myhost4
     curl --insecure --user admin:admin
         -X DELETE https://192.168.122.69:5000/api/client/iqn.1994-05.com.redhat:myhost4
@@ -2097,16 +2420,28 @@ def client(target_iqn, client_iqn):
     except CephiSCSIError as err:
         return jsonify(message="{}".format(err)), 400
 
+    # committing host is the node responsible for updating the config object
+    username = request.form.get('username', '')
+    password = request.form.get('password', '')
+    mutual_username = request.form.get('mutual_username', '')
+    mutual_password = request.form.get('mutual_password', '')
+
     # validate the PUT/DELETE request first
     client_usable = valid_client(mode=method[request.method],
                                  client_iqn=client_iqn,
-                                 target_iqn=target_iqn)
+                                 target_iqn=target_iqn,
+                                 username=username,
+                                 password=password,
+                                 mutual_username=mutual_username,
+                                 mutual_password=mutual_password)
     if client_usable != 'ok':
         return jsonify(message=client_usable), 400
 
-    # committing host is the node responsible for updating the config object
-    api_vars = {"committing_host": this_host()}
-
+    api_vars = {"committing_host": this_host(),
+                "username": username,
+                "password": password,
+                "mutual_username": mutual_username,
+                "mutual_password": mutual_password}
     if request.method == 'PUT':
         # creating a client is done locally first, then applied to the
         # other gateways

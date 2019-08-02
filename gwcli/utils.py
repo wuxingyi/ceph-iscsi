@@ -264,7 +264,16 @@ def valid_client(**kwargs):
                     "has been defined "
                     "(>{} gateways)".format(settings.config.minimum_gateways))
 
-        # at this point pre-req's look good
+
+        username = kwargs['username']
+        password = kwargs['password']
+        mutual_username = kwargs['mutual_username']
+        mutual_password = kwargs['mutual_password']
+
+        error_msg = valid_credentials(username, password, mutual_username, mutual_password)
+        if error_msg:
+            return error_msg
+
         return 'ok'
 
     elif mode == 'delete':
