@@ -1043,10 +1043,13 @@ def disk(pool, image):
     image_id = '{}/{}'.format(pool, image)
 
     if request.method == 'GET':
-
         if image_id in config.config['disks']:
-            return jsonify(config.config["disks"][image_id]), 200
-
+            try:
+                rbd_image = RBDDev(image, 0, LUN.DEFAULT_BACKSTORE, pool)
+                size = rbd_image.current_size
+            except rbd.ImageNotFound:
+                return jsonify(message="Image {} does not exist".format(image_id)), 400
+            return jsonify(messages={"size": size}), 200
         else:
             return jsonify(message="rbd image {} not "
                                    "found".format(image_id)), 404
